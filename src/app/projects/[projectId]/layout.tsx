@@ -15,6 +15,7 @@ const tabs = [
   { href: "", label: "概要" },
   { href: "/survey", label: "調査" },
   { href: "/analysis", label: "分析" },
+  { href: "/diagnosis", label: "基礎診断" },
   { href: "/action", label: "対策" },
 ];
 

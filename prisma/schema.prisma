@@ -29,6 +29,7 @@ model Project {
   analyses        Analysis[]
   recommendations Recommendation[]
   surveys         Survey[]
+  diagnoses       Diagnosis[]
 }
 
 model Survey {
@@ -85,6 +86,24 @@ model Analysis {
   weaknesses       String
   createdAt        DateTime @default(now())
   project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model Diagnosis {
+  id          String   @id @default(cuid())
+  projectId   String
+  scores      String   @default("{}") // JSON: { "1": 5, "2": 3, ... }
+  notes       String   @default("{}") // JSON: { "1": "メモ", ... }
+  totalScore  Float    @default(0)
+  maxScore    Float    @default(100)
+  categoryA   Float    @default(0) // 技術的要素・アクセシビリティ
+  categoryB   Float    @default(0) // 権威性・信頼性（E-E-A-T）
+  categoryC   Float    @default(0) // コンテンツ適合性
+  categoryD   Float    @default(0) // 外部評価・サイテーション
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId])
 }
