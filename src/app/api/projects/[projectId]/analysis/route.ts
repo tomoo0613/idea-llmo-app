@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+// Vercel Serverless Function のタイムアウトを60秒に延長
+export const maxDuration = 60;
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ projectId: string }> }

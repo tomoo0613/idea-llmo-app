@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { generateRecommendations } from "@/lib/action/content-generator";
 
+// Vercel Serverless Function のタイムアウトを60秒に延長
+export const maxDuration = 60;
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ projectId: string }> }
@@ -52,9 +55,21 @@ export async function POST(
     );
   }
 
-  const targetServices: string[] = JSON.parse(project.targetServices || "[]");
-  const weaknesses: string[] = JSON.parse(analysis.weaknesses);
-  const mentionBreakdown: Record<string, number> = JSON.parse(analysis.mentionBreakdown);
+  let targetServices: string[] = [];
+  let weaknesses: string[] = [];
+  let mentionBreakdown: Record<string, number> = {};
+
+  try {
+    targetServices = JSON.parse(project.targetServices || "[]");
+    weaknesses = JSON.parse(analysis.weaknesses || "[]");
+    mentionBreakdown = JSON.parse(analysis.mentionBreakdown || "{}");
+  } catch (parseErr) {
+    console.error("JSON parse error in analysis data:", parseErr);
+    return NextResponse.json(
+      { error: "分析データの読み取りに失敗しました。再度分析を実行してください。" },
+      { status: 400 }
+    );
+  }
 
   // 言及が少ないサービスを特定
   const weakServices = targetServices.filter((svc) => {
