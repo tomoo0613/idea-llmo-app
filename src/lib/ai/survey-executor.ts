@@ -3,7 +3,7 @@ import { queryOpenAI } from "./openai-client";
 import { queryGemini } from "./gemini-client";
 import { queryClaude } from "./claude-client";
 import { checkServiceMention, checkDomainCited } from "./url-extractor";
-import { MODEL_VARIANTS, type ModelVariant, type AIResponse } from "./types";
+import { MODEL_VARIANTS, type ModelVariant, type AIProvider, type AIResponse } from "./types";
 
 interface SurveyConfig {
   surveyId: string;
@@ -21,6 +21,12 @@ const RETRY_DELAY_MS = 5000; // 5秒
 
 /** 検索ONのモデルは3回試行、検索OFFは1回 */
 const SEARCH_ATTEMPT_COUNT = 3;
+
+/** プロバイダー内のモデル間待機（レート制限回避） */
+const INTRA_PROVIDER_DELAY_MS = 500;
+
+/** 検索モード複数試行の間隔 */
+const SEARCH_ATTEMPT_DELAY_MS = 1500;
 
 async function queryVariant(
   variant: ModelVariant,
@@ -99,8 +105,8 @@ async function queryMultiAttempt(
 
   for (let i = 0; i < attemptCount; i++) {
     if (i > 0) {
-      // 試行間の待機（レート制限回避）
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      // 試行間の待機（レート制限回避）— 最適化: 3000ms → 1500ms
+      await new Promise((resolve) => setTimeout(resolve, SEARCH_ATTEMPT_DELAY_MS));
     }
     console.log(`[Survey] ${variant.variantName}: 試行 ${i + 1}/${attemptCount}`);
     const response = await queryWithRetry(variant, prompt, keys);
@@ -154,6 +160,94 @@ function splitPrompts(promptText: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+/**
+ * プロバイダー別にバリアントをグループ化
+ */
+function groupByProvider(variants: ModelVariant[]): Record<AIProvider, ModelVariant[]> {
+  const groups: Record<AIProvider, ModelVariant[]> = {
+    openai: [],
+    gemini: [],
+    claude: [],
+  };
+  for (const v of variants) {
+    groups[v.provider].push(v);
+  }
+  return groups;
+}
+
+/**
+ * 1つのプロバイダー内のバリアントを直列に実行（レート制限回避）
+ * ただし待機時間は最小限（500ms）
+ */
+async function executeProviderVariants(
+  variants: ModelVariant[],
+  currentPrompt: string,
+  pIdx: number,
+  keys: { openai: string | null; gemini: string | null; claude: string | null },
+  config: {
+    surveyId: string;
+    targetDomain: string;
+    targetServices: string[];
+  },
+  onStepDone: () => Promise<void>
+): Promise<void> {
+  for (let vIdx = 0; vIdx < variants.length; vIdx++) {
+    const variant = variants[vIdx];
+
+    // 同一プロバイダー内 2つ目以降は短い待機（レート制限回避）
+    if (vIdx > 0) {
+      await new Promise((resolve) => setTimeout(resolve, INTRA_PROVIDER_DELAY_MS));
+    }
+
+    // 検索ONモデルは複数回試行、検索OFFは1回
+    const attemptCount = variant.searchEnabled ? SEARCH_ATTEMPT_COUNT : 1;
+
+    let response: (AIResponse & { _combinedText?: string }) | null;
+    if (attemptCount > 1) {
+      response = await queryMultiAttempt(variant, currentPrompt, keys, attemptCount);
+    } else {
+      response = await queryWithRetry(variant, currentPrompt, keys);
+    }
+
+    if (response) {
+      // サービス言及チェック（複数試行の場合は結合テキストで判定）
+      const textForCheck = response._combinedText || response.text;
+      const serviceMentions: Record<string, boolean> = {};
+      for (const svc of config.targetServices) {
+        serviceMentions[svc] = response.error
+          ? false
+          : checkServiceMention(textForCheck, svc);
+      }
+
+      // ドメイン引用チェック（全試行のURL統合済み）
+      const domainCited = response.error
+        ? false
+        : checkDomainCited(response.citedUrls, config.targetDomain);
+
+      await prisma.surveyResult.create({
+        data: {
+          surveyId: config.surveyId,
+          promptIndex: pIdx,
+          promptText: currentPrompt,
+          modelVariant: variant.variantName,
+          provider: variant.provider,
+          modelId: variant.modelId,
+          searchEnabled: variant.searchEnabled,
+          responseText: response.text,
+          responseTimeMs: response.responseTimeMs,
+          serviceMentions: JSON.stringify(serviceMentions),
+          targetDomainCited: domainCited,
+          citedUrls: JSON.stringify(response.citedUrls),
+          error: response.error || null,
+        },
+      });
+    }
+
+    // 進捗更新
+    await onStepDone();
+  }
+}
+
 export async function executeSurvey(config: SurveyConfig) {
   const {
     surveyId, prompt, targetDomain, targetServices,
@@ -188,65 +282,47 @@ export async function executeSurvey(config: SurveyConfig) {
     data: { status: "running", startedAt: new Date(), totalSteps },
   });
 
+  // プロバイダー別にグループ化
+  const providerGroups = groupByProvider(activeVariants);
+
+  // 進捗更新コールバック（並列安全にインクリメント）
+  const onStepDone = async () => {
+    await prisma.survey.update({
+      where: { id: surveyId },
+      data: { doneSteps: { increment: 1 } },
+    });
+  };
+
   try {
     for (let pIdx = 0; pIdx < prompts.length; pIdx++) {
       const currentPrompt = prompts[pIdx];
       console.log(`[Survey] プロンプト ${pIdx + 1}/${prompts.length}: "${currentPrompt.slice(0, 50)}..."`);
 
-      for (const variant of activeVariants) {
-        // 検索ONモデルは複数回試行、検索OFFは1回
-        const attemptCount = variant.searchEnabled ? SEARCH_ATTEMPT_COUNT : 1;
+      // ★ 各プロバイダーを並列実行（OpenAI / Gemini / Claude 同時）
+      // プロバイダー内は直列（レート制限回避）
+      const providerTasks: Promise<void>[] = [];
 
-        let response: (AIResponse & { _combinedText?: string }) | null;
-        if (attemptCount > 1) {
-          response = await queryMultiAttempt(variant, currentPrompt, keys, attemptCount);
-        } else {
-          response = await queryWithRetry(variant, currentPrompt, keys);
-        }
+      for (const [provider, variants] of Object.entries(providerGroups)) {
+        if (variants.length === 0) continue;
 
-        if (response) {
-          // サービス言及チェック（複数試行の場合は結合テキストで判定）
-          const textForCheck = response._combinedText || response.text;
-          const serviceMentions: Record<string, boolean> = {};
-          for (const svc of targetServices) {
-            serviceMentions[svc] = response.error
-              ? false
-              : checkServiceMention(textForCheck, svc);
-          }
+        console.log(`[Survey] ${provider}: ${variants.length}モデルを実行開始`);
 
-          // ドメイン引用チェック（全試行のURL統合済み）
-          const domainCited = response.error
-            ? false
-            : checkDomainCited(response.citedUrls, targetDomain);
-
-          await prisma.surveyResult.create({
-            data: {
-              surveyId,
-              promptIndex: pIdx,
-              promptText: currentPrompt,
-              modelVariant: variant.variantName,
-              provider: variant.provider,
-              modelId: variant.modelId,
-              searchEnabled: variant.searchEnabled,
-              responseText: response.text,
-              responseTimeMs: response.responseTimeMs,
-              serviceMentions: JSON.stringify(serviceMentions),
-              targetDomainCited: domainCited,
-              citedUrls: JSON.stringify(response.citedUrls),
-              error: response.error || null,
-            },
-          });
-        }
-
-        // 進捗更新
-        await prisma.survey.update({
-          where: { id: surveyId },
-          data: { doneSteps: { increment: 1 } },
-        });
-
-        // レート制限回避（バリアント間の待機）
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        providerTasks.push(
+          executeProviderVariants(
+            variants,
+            currentPrompt,
+            pIdx,
+            keys,
+            { surveyId, targetDomain, targetServices },
+            onStepDone
+          )
+        );
       }
+
+      // 全プロバイダーの完了を待つ
+      await Promise.all(providerTasks);
+
+      console.log(`[Survey] プロンプト ${pIdx + 1}/${prompts.length} 完了`);
     }
 
     await prisma.survey.update({
