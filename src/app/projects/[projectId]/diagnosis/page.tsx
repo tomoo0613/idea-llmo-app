@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import * as XLSX from "xlsx";
 
 // 20項目の診断定義
 const DIAGNOSIS_ITEMS = [
@@ -233,6 +234,14 @@ const categoryBgColors: Record<string, string> = {
   D: "border-l-orange-500",
 };
 
+// スコアから理由テキストを取得
+function getScoreReason(item: { score5: string; score3: string; score1: string }, score: number): string {
+  if (score === 5) return item.score5;
+  if (score === 3) return item.score3;
+  if (score === 1) return item.score1;
+  return "";
+}
+
 interface SavedDiagnosis {
   id: string;
   scores: string;
@@ -308,6 +317,72 @@ export default function DiagnosisPage() {
     setSaving(false);
   }
 
+  function exportToExcel() {
+    const wb = XLSX.utils.book_new();
+
+    // ヘッダー行
+    const rows: (string | number)[][] = [
+      ["LLMO基礎診断結果"],
+      ["対象ドメイン", domain || "未設定"],
+      ["診断日", saved ? new Date(saved.createdAt).toLocaleDateString("ja-JP") : new Date().toLocaleDateString("ja-JP")],
+      ["総合スコア", totalScore, "/", maxScore, `(${percentage}%)`],
+      [],
+      ["No", "カテゴリ", "項目名", "評価ポイント", "確認方法", "評価点数", "評価理由", "メモ"],
+    ];
+
+    // 各項目のデータ行
+    for (const group of DIAGNOSIS_ITEMS) {
+      for (const item of group.items) {
+        const sc = scores[String(item.id)];
+        const reason = sc !== undefined ? getScoreReason(item, sc) : "";
+        const note = notes[String(item.id)] || "";
+        rows.push([
+          item.id,
+          `${group.category}. ${group.categoryName}`,
+          item.name,
+          item.point,
+          item.method,
+          sc !== undefined ? sc : "",
+          reason,
+          note,
+        ]);
+      }
+    }
+
+    // カテゴリ別サマリー
+    rows.push([]);
+    rows.push(["カテゴリ別スコア"]);
+    rows.push(["カテゴリ", "スコア", "満点", "割合"]);
+    const catMap = { A: categoryScores.A, B: categoryScores.B, C: categoryScores.C, D: categoryScores.D };
+    for (const group of DIAGNOSIS_ITEMS) {
+      const cs = catMap[group.category as keyof typeof catMap];
+      rows.push([
+        `${group.category}. ${group.categoryName}`,
+        cs,
+        25,
+        `${Math.round((cs / 25) * 100)}%`,
+      ]);
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+
+    // 列幅設定
+    ws["!cols"] = [
+      { wch: 4 },   // No
+      { wch: 28 },  // カテゴリ
+      { wch: 20 },  // 項目名
+      { wch: 45 },  // 評価ポイント
+      { wch: 50 },  // 確認方法
+      { wch: 8 },   // 評価点数
+      { wch: 40 },  // 評価理由
+      { wch: 30 },  // メモ
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, "基礎診断");
+    XLSX.writeFile(wb, `LLMO基礎診断_${domain || "未設定"}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    toast.success("Excelファイルをダウンロードしました");
+  }
+
   // スコア集計
   const totalScore = Object.values(scores).reduce((sum, v) => sum + v, 0);
   const answeredCount = Object.keys(scores).length;
@@ -380,6 +455,13 @@ export default function DiagnosisPage() {
                   }}
                 >
                   リセット
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={exportToExcel}
+                  disabled={answeredCount === 0}
+                >
+                  📥 Excel出力
                 </Button>
                 <Button
                   onClick={saveDiagnosis}
@@ -481,11 +563,18 @@ export default function DiagnosisPage() {
                         <p className="text-xs text-muted-foreground mt-0.5">{item.point}</p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 shrink-0">
                       {currentScore !== undefined && (
-                        <Badge variant={currentScore >= 5 ? "default" : currentScore >= 3 ? "secondary" : "destructive"}>
-                          {currentScore}点
-                        </Badge>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={currentScore >= 5 ? "default" : currentScore >= 3 ? "secondary" : "destructive"}>
+                            {currentScore}点
+                          </Badge>
+                          {!isExpanded && (
+                            <span className="text-xs text-muted-foreground max-w-[200px] truncate">
+                              {getScoreReason(item, currentScore)}
+                            </span>
+                          )}
+                        </div>
                       )}
                       <span className="text-xs text-muted-foreground">
                         {isExpanded ? "▲" : "▼"}
