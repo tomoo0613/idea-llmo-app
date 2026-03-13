@@ -21,9 +21,14 @@ interface Recommendation {
 }
 
 const categoryLabels: Record<string, string> = {
+  "research-pr": "リサピー®（調査PR）",
+  whitepaper: "ハクピー®（白書）",
+  report: "レポピー®（レポート）",
+  column: "コラピー®（コラム）",
+  "structured-data": "構造化データ",
+  // 旧カテゴリとの後方互換
   content: "コンテンツ",
   faq: "FAQ",
-  "structured-data": "構造化データ",
   brand: "ブランド",
   seo: "SEO",
 };
