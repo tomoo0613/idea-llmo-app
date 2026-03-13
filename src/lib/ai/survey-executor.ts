@@ -3,7 +3,7 @@ import { queryOpenAI } from "./openai-client";
 import { queryGemini } from "./gemini-client";
 import { queryClaude } from "./claude-client";
 import { checkServiceMention, checkDomainCited } from "./url-extractor";
-import { MODEL_VARIANTS, type ModelVariant, type AIProvider, type AIResponse } from "./types";
+import { MODEL_VARIANTS, type ModelVariant, type AIResponse } from "./types";
 
 interface SurveyConfig {
   surveyId: string;
@@ -16,17 +16,52 @@ interface SurveyConfig {
   claudeApiKey: string | null;
 }
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 5000; // 5秒
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 3000;
 
-/** 検索ONのモデルは3回試行、検索OFFは1回 */
+/** 検索ONのモデルは3回試行（並列実行） */
 const SEARCH_ATTEMPT_COUNT = 3;
 
-/** プロバイダー内のモデル間待機（レート制限回避） */
-const INTRA_PROVIDER_DELAY_MS = 500;
+/** 同一プロバイダーへの同時リクエスト上限 */
+const MAX_CONCURRENT_PER_PROVIDER = 2;
 
-/** 検索モード複数試行の間隔 */
-const SEARCH_ATTEMPT_DELAY_MS = 1500;
+/** プロンプト同時実行数 */
+const MAX_CONCURRENT_PROMPTS = 2;
+
+// ──────────────────── ユーティリティ ────────────────────
+
+/** 並行数制限付きセマフォ */
+class Semaphore {
+  private queue: (() => void)[] = [];
+  private current = 0;
+  constructor(private max: number) {}
+  async acquire(): Promise<void> {
+    if (this.current < this.max) {
+      this.current++;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => {
+        this.current++;
+        resolve();
+      });
+    });
+  }
+  release(): void {
+    this.current--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+// プロバイダー別セマフォ（API レート制限回避）
+const providerSemaphores: Record<string, Semaphore> = {
+  openai: new Semaphore(MAX_CONCURRENT_PER_PROVIDER),
+  gemini: new Semaphore(MAX_CONCURRENT_PER_PROVIDER),
+  claude: new Semaphore(MAX_CONCURRENT_PER_PROVIDER),
+};
+
+// ──────────────────── AI クエリ ────────────────────
 
 async function queryVariant(
   variant: ModelVariant,
@@ -69,18 +104,10 @@ async function queryWithRetry(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const response = await queryVariant(variant, prompt, keys);
     if (!response) return null;
-
-    // エラーなし or リトライ不可のエラー → 即返す
-    if (!response.error || !isRetryableError(response.error)) {
-      return response;
-    }
-
-    // リトライ可能エラー: 最後の試行でなければ待ってからリトライ
+    if (!response.error || !isRetryableError(response.error)) return response;
     if (attempt < MAX_RETRIES) {
       const delay = RETRY_DELAY_MS * (attempt + 1);
-      console.log(
-        `[Survey] ${variant.variantName}: レート制限エラー、${delay / 1000}秒後にリトライ (${attempt + 1}/${MAX_RETRIES})`
-      );
+      console.log(`[Survey] ${variant.variantName}: レート制限→${delay / 1000}秒後リトライ (${attempt + 1}/${MAX_RETRIES})`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     } else {
       return response;
@@ -89,36 +116,46 @@ async function queryWithRetry(
   return null;
 }
 
+// ──────────────────── 検索試行（★並列化） ────────────────────
+
 /**
- * 検索ONモデルに対して複数回クエリを実行し、結果を集約する
- * - サービス言及: OR論理（1回でも言及されれば◯）
- * - 引用URL: 全試行のユニオン
- * - レスポンステキスト: 最も長い回答を採用
+ * 検索ONモデルに対して複数回クエリを **並列** 実行し、結果を集約する
+ * - 3回の試行を同時に走らせ、待機時間をゼロに
  */
-async function queryMultiAttempt(
+async function queryMultiAttemptParallel(
   variant: ModelVariant,
   prompt: string,
   keys: { openai: string | null; gemini: string | null; claude: string | null },
   attemptCount: number
-): Promise<AIResponse | null> {
-  const responses: AIResponse[] = [];
+): Promise<(AIResponse & { _combinedText?: string }) | null> {
+  console.log(`[Survey] ${variant.variantName}: ${attemptCount}回並列試行開始`);
 
-  for (let i = 0; i < attemptCount; i++) {
-    if (i > 0) {
-      // 試行間の待機（レート制限回避）— 最適化: 3000ms → 1500ms
-      await new Promise((resolve) => setTimeout(resolve, SEARCH_ATTEMPT_DELAY_MS));
-    }
-    console.log(`[Survey] ${variant.variantName}: 試行 ${i + 1}/${attemptCount}`);
-    const response = await queryWithRetry(variant, prompt, keys);
-    if (response && !response.error) {
-      responses.push(response);
+  // ★ 全試行を並列実行
+  const results = await Promise.allSettled(
+    Array.from({ length: attemptCount }, (_, i) => {
+      // 少しだけオフセット（同一エンドポイントの瞬間的衝突回避: 0, 200ms, 400ms）
+      return new Promise<AIResponse | null>((resolve) =>
+        setTimeout(
+          () => queryWithRetry(variant, prompt, keys).then(resolve),
+          i * 200
+        )
+      );
+    })
+  );
+
+  const responses: AIResponse[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value && !r.value.error) {
+      responses.push(r.value);
     }
   }
 
   if (responses.length === 0) {
-    // 全試行失敗 → 最後のエラーレスポンスを返す
-    const lastAttempt = await queryWithRetry(variant, prompt, keys);
-    return lastAttempt;
+    // 全試行失敗 → 最初のエラーを返す
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) return r.value;
+    }
+    return null;
   }
 
   // 集約: 最も長いテキストを採用
@@ -130,13 +167,10 @@ async function queryMultiAttempt(
   const allUrls: string[] = [];
   for (const r of responses) {
     for (const url of r.citedUrls) {
-      if (!allUrls.includes(url)) {
-        allUrls.push(url);
-      }
+      if (!allUrls.includes(url)) allUrls.push(url);
     }
   }
 
-  // 全試行のテキストを結合してサービス言及チェックに使用
   const combinedText = responses.map((r) => r.text).join("\n\n---\n\n");
 
   return {
@@ -147,79 +181,43 @@ async function queryMultiAttempt(
       responses.reduce((sum, r) => sum + r.responseTimeMs, 0) / responses.length
     ),
     citedUrls: allUrls,
-    // combinedText を _combinedText として渡す（サービスチェック用）
     _combinedText: combinedText,
   } as AIResponse & { _combinedText?: string };
 }
 
-/** プロンプト文字列を改行で分割し、空行を除外 */
-function splitPrompts(promptText: string): string[] {
-  return promptText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-}
+// ──────────────────── 単一バリアント実行 ────────────────────
 
 /**
- * プロバイダー別にバリアントをグループ化
+ * 1つのバリアントを実行し、結果をDBに保存する
+ * プロバイダー別セマフォで同時接続数を制限
  */
-function groupByProvider(variants: ModelVariant[]): Record<AIProvider, ModelVariant[]> {
-  const groups: Record<AIProvider, ModelVariant[]> = {
-    openai: [],
-    gemini: [],
-    claude: [],
-  };
-  for (const v of variants) {
-    groups[v.provider].push(v);
-  }
-  return groups;
-}
-
-/**
- * 1つのプロバイダー内のバリアントを直列に実行（レート制限回避）
- * ただし待機時間は最小限（500ms）
- */
-async function executeProviderVariants(
-  variants: ModelVariant[],
+async function executeSingleVariant(
+  variant: ModelVariant,
   currentPrompt: string,
   pIdx: number,
   keys: { openai: string | null; gemini: string | null; claude: string | null },
-  config: {
-    surveyId: string;
-    targetDomain: string;
-    targetServices: string[];
-  },
+  config: { surveyId: string; targetDomain: string; targetServices: string[] },
   onStepDone: () => Promise<void>
 ): Promise<void> {
-  for (let vIdx = 0; vIdx < variants.length; vIdx++) {
-    const variant = variants[vIdx];
+  const sem = providerSemaphores[variant.provider];
+  await sem.acquire();
 
-    // 同一プロバイダー内 2つ目以降は短い待機（レート制限回避）
-    if (vIdx > 0) {
-      await new Promise((resolve) => setTimeout(resolve, INTRA_PROVIDER_DELAY_MS));
-    }
-
-    // 検索ONモデルは複数回試行、検索OFFは1回
+  try {
     const attemptCount = variant.searchEnabled ? SEARCH_ATTEMPT_COUNT : 1;
 
     let response: (AIResponse & { _combinedText?: string }) | null;
     if (attemptCount > 1) {
-      response = await queryMultiAttempt(variant, currentPrompt, keys, attemptCount);
+      response = await queryMultiAttemptParallel(variant, currentPrompt, keys, attemptCount);
     } else {
       response = await queryWithRetry(variant, currentPrompt, keys);
     }
 
     if (response) {
-      // サービス言及チェック（複数試行の場合は結合テキストで判定）
       const textForCheck = response._combinedText || response.text;
       const serviceMentions: Record<string, boolean> = {};
       for (const svc of config.targetServices) {
-        serviceMentions[svc] = response.error
-          ? false
-          : checkServiceMention(textForCheck, svc);
+        serviceMentions[svc] = response.error ? false : checkServiceMention(textForCheck, svc);
       }
-
-      // ドメイン引用チェック（全試行のURL統合済み）
       const domainCited = response.error
         ? false
         : checkDomainCited(response.citedUrls, config.targetDomain);
@@ -243,10 +241,45 @@ async function executeProviderVariants(
       });
     }
 
-    // 進捗更新
     await onStepDone();
+  } finally {
+    sem.release();
   }
 }
+
+// ──────────────────── プロンプト分割 ────────────────────
+
+function splitPrompts(promptText: string): string[] {
+  return promptText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+// ──────────────────── 並列実行コントローラー ────────────────────
+
+/**
+ * 配列を指定並行数で処理する汎用関数
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  const executing: Promise<void>[] = [];
+  for (const item of items) {
+    const p = fn(item).then(() => {
+      executing.splice(executing.indexOf(p), 1);
+    });
+    executing.push(p);
+    if (executing.length >= concurrency) {
+      await Promise.race(executing);
+    }
+  }
+  await Promise.all(executing);
+}
+
+// ──────────────────── メインエントリ ────────────────────
 
 export async function executeSurvey(config: SurveyConfig) {
   const {
@@ -256,7 +289,6 @@ export async function executeSurvey(config: SurveyConfig) {
 
   const keys = { openai: openaiApiKey, gemini: geminiApiKey, claude: claudeApiKey };
 
-  // プロンプトを改行で分割
   const prompts = splitPrompts(prompt);
   if (prompts.length === 0) {
     await prisma.survey.update({
@@ -274,7 +306,6 @@ export async function executeSurvey(config: SurveyConfig) {
     return true;
   });
 
-  // totalSteps = プロンプト数 × モデル数
   const totalSteps = prompts.length * activeVariants.length;
 
   await prisma.survey.update({
@@ -282,10 +313,6 @@ export async function executeSurvey(config: SurveyConfig) {
     data: { status: "running", startedAt: new Date(), totalSteps },
   });
 
-  // プロバイダー別にグループ化
-  const providerGroups = groupByProvider(activeVariants);
-
-  // 進捗更新コールバック（並列安全にインクリメント）
   const onStepDone = async () => {
     await prisma.survey.update({
       where: { id: surveyId },
@@ -294,36 +321,31 @@ export async function executeSurvey(config: SurveyConfig) {
   };
 
   try {
-    for (let pIdx = 0; pIdx < prompts.length; pIdx++) {
-      const currentPrompt = prompts[pIdx];
-      console.log(`[Survey] プロンプト ${pIdx + 1}/${prompts.length}: "${currentPrompt.slice(0, 50)}..."`);
+    // ★ 複数プロンプトを同時実行（MAX_CONCURRENT_PROMPTS 並列）
+    await runWithConcurrency(
+      prompts.map((p, i) => ({ prompt: p, idx: i })),
+      MAX_CONCURRENT_PROMPTS,
+      async ({ prompt: currentPrompt, idx: pIdx }) => {
+        console.log(`[Survey] プロンプト ${pIdx + 1}/${prompts.length}: "${currentPrompt.slice(0, 50)}..."`);
 
-      // ★ 各プロバイダーを並列実行（OpenAI / Gemini / Claude 同時）
-      // プロバイダー内は直列（レート制限回避）
-      const providerTasks: Promise<void>[] = [];
-
-      for (const [provider, variants] of Object.entries(providerGroups)) {
-        if (variants.length === 0) continue;
-
-        console.log(`[Survey] ${provider}: ${variants.length}モデルを実行開始`);
-
-        providerTasks.push(
-          executeProviderVariants(
-            variants,
-            currentPrompt,
-            pIdx,
-            keys,
-            { surveyId, targetDomain, targetServices },
-            onStepDone
+        // ★ 全バリアントを同時並列実行
+        // プロバイダー別セマフォで自動的に同時接続数を制限
+        await Promise.allSettled(
+          activeVariants.map((variant) =>
+            executeSingleVariant(
+              variant,
+              currentPrompt,
+              pIdx,
+              keys,
+              { surveyId, targetDomain, targetServices },
+              onStepDone
+            )
           )
         );
+
+        console.log(`[Survey] プロンプト ${pIdx + 1}/${prompts.length} 完了`);
       }
-
-      // 全プロバイダーの完了を待つ
-      await Promise.all(providerTasks);
-
-      console.log(`[Survey] プロンプト ${pIdx + 1}/${prompts.length} 完了`);
-    }
+    );
 
     await prisma.survey.update({
       where: { id: surveyId },
