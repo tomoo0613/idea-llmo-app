@@ -246,6 +246,12 @@ interface SavedDiagnosis {
   createdAt: string;
 }
 
+interface ProjectInfo {
+  id: string;
+  name: string;
+  targetDomain: string;
+}
+
 export default function DiagnosisPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const [scores, setScores] = useState<Record<string, number>>({});
@@ -254,13 +260,20 @@ export default function DiagnosisPage() {
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState<SavedDiagnosis | null>(null);
   const [expandedItem, setExpandedItem] = useState<number | null>(null);
+  const [project, setProject] = useState<ProjectInfo | null>(null);
+  const [started, setStarted] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/projects/${projectId}/diagnosis`)
-      .then((res) => res.json())
-      .then((data: SavedDiagnosis | null) => {
+    // プロジェクト情報と診断データを並列取得
+    Promise.all([
+      fetch(`/api/projects/${projectId}`).then((res) => res.json()),
+      fetch(`/api/projects/${projectId}/diagnosis`).then((res) => res.json()),
+    ])
+      .then(([proj, data]: [ProjectInfo, SavedDiagnosis | null]) => {
+        setProject(proj);
         if (data) {
           setSaved(data);
+          setStarted(true);
           try {
             setScores(JSON.parse(data.scores));
             setNotes(JSON.parse(data.notes));
@@ -315,10 +328,97 @@ export default function DiagnosisPage() {
     return "text-red-600";
   }
 
+  function startDiagnosis() {
+    setStarted(true);
+    setExpandedItem(1); // 最初の項目を開く
+  }
+
   if (loading) return <p className="text-muted-foreground">読み込み中...</p>;
+
+  const domain = project?.targetDomain || "";
 
   return (
     <div className="space-y-6">
+      {/* 対象サイト＋診断開始 */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-muted-foreground">診断対象サイト</p>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-xl font-bold">{domain || "未設定"}</span>
+                {domain && (
+                  <a
+                    href={`https://${domain}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-blue-600 hover:underline"
+                  >
+                    サイトを開く &rarr;
+                  </a>
+                )}
+              </div>
+              {saved && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  最終診断: {new Date(saved.createdAt).toLocaleDateString("ja-JP")}
+                </p>
+              )}
+            </div>
+            {!started ? (
+              <Button onClick={startDiagnosis} size="lg">
+                診断を開始
+              </Button>
+            ) : (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setScores({});
+                    setNotes({});
+                    setSaved(null);
+                    setExpandedItem(1);
+                  }}
+                >
+                  リセット
+                </Button>
+                <Button
+                  onClick={saveDiagnosis}
+                  disabled={saving || answeredCount === 0}
+                >
+                  {saving ? "保存中..." : "診断を保存"}
+                </Button>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {!started ? (
+        <Card>
+          <CardContent className="py-12 text-center space-y-3">
+            <p className="text-lg font-medium">LLMO基礎診断（20項目）</p>
+            <p className="text-sm text-muted-foreground">
+              対象ドメインのLLMO対応状況を4カテゴリ・20項目で診断します。
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 max-w-2xl mx-auto mt-4">
+              {(["A", "B", "C", "D"] as const).map((cat) => {
+                const catInfo = DIAGNOSIS_ITEMS.find((c) => c.category === cat)!;
+                return (
+                  <div key={cat} className={`p-3 rounded-md border ${categoryColors[cat]}`}>
+                    <p className="font-bold text-sm">{cat}. {catInfo.categoryName}</p>
+                    <p className="text-xs mt-1">5項目</p>
+                  </div>
+                );
+              })}
+            </div>
+            <Button onClick={startDiagnosis} size="lg" className="mt-4">
+              診断を開始する
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <>
+
       {/* サマリーカード */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         <Card className="md:col-span-1">
@@ -460,7 +560,7 @@ export default function DiagnosisPage() {
         </div>
       ))}
 
-      {/* 保存ボタン */}
+      {/* 保存ボタン（フッター固定） */}
       <div className="sticky bottom-4 flex justify-center">
         <Button
           onClick={saveDiagnosis}
@@ -471,6 +571,9 @@ export default function DiagnosisPage() {
           {saving ? "保存中..." : `基礎診断を保存（${answeredCount}/20項目）`}
         </Button>
       </div>
+
+        </>
+      )}
     </div>
   );
 }
