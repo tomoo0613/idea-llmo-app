@@ -62,6 +62,31 @@ export default function ProjectOverviewPage() {
     }
   }
 
+  async function handleExportDocx() {
+    toast.info("Word提案書を生成中...");
+    try {
+      const res = await fetch(`/api/projects/${projectId}/export-docx`);
+      if (!res.ok) {
+        const err = await res.json();
+        toast.error(err.error || "エクスポートに失敗しました");
+        return;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const match = cd.match(/filename\*=UTF-8''(.+)/);
+      const filename = match ? decodeURIComponent(match[1]) : "LLMO提案書.docx";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Word提案書をダウンロードしました");
+    } catch {
+      toast.error("ダウンロードに失敗しました");
+    }
+  }
+
   if (!project) return <p className="text-muted-foreground">読み込み中...</p>;
 
   const targetServices: string[] = (() => {
@@ -169,6 +194,9 @@ export default function ProjectOverviewPage() {
       <div className="pt-4 flex gap-3">
         <Button variant="outline" onClick={handleExport}>
           📥 全データExcel出力
+        </Button>
+        <Button variant="outline" onClick={handleExportDocx}>
+          📄 Word提案書出力
         </Button>
         <Button variant="destructive" onClick={handleDelete}>
           プロジェクトを削除
