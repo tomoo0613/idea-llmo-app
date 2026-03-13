@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
 
 interface Project {
   id: string;
@@ -34,6 +35,31 @@ export default function ProjectOverviewPage() {
     if (!confirm("このプロジェクトを削除しますか？")) return;
     await fetch(`/api/projects/${projectId}`, { method: "DELETE" });
     router.push("/projects");
+  }
+
+  async function handleExport() {
+    toast.info("Excelファイルを生成中...");
+    try {
+      const res = await fetch(`/api/projects/${projectId}/export`);
+      if (!res.ok) {
+        const err = await res.json();
+        toast.error(err.error || "エクスポートに失敗しました");
+        return;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const match = cd.match(/filename\*=UTF-8''(.+)/);
+      const filename = match ? decodeURIComponent(match[1]) : "LLMO分析レポート.xlsx";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Excelファイルをダウンロードしました");
+    } catch {
+      toast.error("ダウンロードに失敗しました");
+    }
   }
 
   if (!project) return <p className="text-muted-foreground">読み込み中...</p>;
@@ -140,7 +166,10 @@ export default function ProjectOverviewPage() {
         </CardContent>
       </Card>
 
-      <div className="pt-4">
+      <div className="pt-4 flex gap-3">
+        <Button variant="outline" onClick={handleExport}>
+          📥 全データExcel出力
+        </Button>
         <Button variant="destructive" onClick={handleDelete}>
           プロジェクトを削除
         </Button>

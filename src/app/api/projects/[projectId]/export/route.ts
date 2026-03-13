@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { generateExcel } from "@/lib/excel-exporter";
+import { generateFullExcel } from "@/lib/excel-exporter";
 
 export async function GET(
   _request: Request,
@@ -15,33 +15,55 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const survey = await prisma.survey.findFirst({
-    where: { projectId, status: "completed" },
-    orderBy: { createdAt: "desc" },
-  });
-  if (!survey) {
-    return NextResponse.json(
-      { error: "完了した調査がありません" },
-      { status: 400 }
-    );
-  }
+  // 全データを並列取得
+  const [survey, analysis, diagnosis, recommendations] = await Promise.all([
+    prisma.survey.findFirst({
+      where: { projectId, status: "completed" },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.analysis.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.diagnosis.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.recommendation.findMany({
+      where: { projectId },
+      orderBy: { priority: "asc" },
+    }),
+  ]);
 
-  const results = await prisma.surveyResult.findMany({
-    where: { surveyId: survey.id },
-    orderBy: [{ promptIndex: "asc" }, { modelVariant: "asc" }],
-  });
+  // 調査結果（あれば）
+  const surveyResults = survey
+    ? await prisma.surveyResult.findMany({
+        where: { surveyId: survey.id },
+        orderBy: [{ promptIndex: "asc" }, { modelVariant: "asc" }],
+      })
+    : [];
 
   const targetServices: string[] = JSON.parse(project.targetServices || "[]");
 
-  const buffer = generateExcel({
-    prompt: project.prompt,
-    targetDomain: project.targetDomain,
-    targetServices,
-    results,
+  const buffer = generateFullExcel({
+    project: {
+      name: project.name,
+      description: project.description,
+      prompt: project.prompt,
+      targetDomain: project.targetDomain,
+      targetServices,
+      targetCustomer: project.targetCustomer,
+      ruleMaking: project.ruleMaking,
+      createdAt: project.createdAt.toISOString(),
+    },
+    surveyResults,
+    analysis,
+    diagnosis,
+    recommendations,
   });
 
   const now = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
-  const filename = `${now}_LLMモニタリング.xlsx`;
+  const filename = `${project.name}_LLMO分析レポート_${now}.xlsx`;
 
   return new NextResponse(new Uint8Array(buffer), {
     headers: {
