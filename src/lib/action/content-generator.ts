@@ -86,7 +86,7 @@ ${input.weaknesses.length > 0 ? input.weaknesses.join("\n") : "特になし"}
 ## AI検索で言及が少ないキーワード
 ${input.weakServices.length > 0 ? input.weakServices.join("、") : "なし"}
 
-上記を踏まえて、5〜8個の具体的な対策を、以下のJSON配列形式で出力してください。
+上記を踏まえて、5個の具体的な対策を、以下のJSON配列形式で出力してください。
 各対策は優先度順（priority: 1が最優先）にしてください。
 
 カテゴリは以下から選択:
@@ -103,16 +103,16 @@ ${input.weakServices.length > 0 ? input.weakServices.join("、") : "なし"}
     "priority": 1,
     "category": "content",
     "title": "対策のタイトル",
-    "description": "具体的に何をすべきか",
-    "rationale": "なぜこの対策がAI表示に効果的か",
-    "suggestedContent": "実際に作成すべきコンテンツのドラフト（300-500文字）",
+    "description": "具体的に何をすべきか（100文字以内）",
+    "rationale": "なぜこの対策がAI表示に効果的か（100文字以内）",
+    "suggestedContent": "実際に作成すべきコンテンツのドラフト（200文字程度）",
     "targetPrompts": ["関連するキーワード1", "関連するキーワード2"]
   }
 ]`;
 
   const response = await client.messages.create({
-    model: "claude-sonnet-4-5-20250929",
-    max_tokens: 8192,
+    model: "claude-3-5-haiku-20241022",
+    max_tokens: 4096,
     messages: [{ role: "user", content: prompt }],
   });
 
