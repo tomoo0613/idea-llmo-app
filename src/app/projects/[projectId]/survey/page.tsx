@@ -197,6 +197,14 @@ export default function SurveyPage() {
     ? Math.round((survey.doneSteps / survey.totalSteps) * 100)
     : 0;
 
+  // 推定残り時間の計算
+  const estimatedRemaining = useMemo(() => {
+    if (!survey || survey.doneSteps === 0 || survey.totalSteps === 0 || elapsedTime === 0) return null;
+    const avgPerStep = elapsedTime / survey.doneSteps;
+    const remaining = Math.round(avgPerStep * (survey.totalSteps - survey.doneSteps));
+    return remaining;
+  }, [survey, elapsedTime]);
+
   const statusConfig = survey ? STATUS_CONFIG[survey.status] || STATUS_CONFIG.pending : null;
 
   return (
@@ -263,18 +271,30 @@ export default function SurveyPage() {
                 <span className="font-medium text-blue-700 dark:text-blue-400">
                   調査進行中...
                 </span>
-                <span className="text-muted-foreground">
-                  経過時間: {formatTime(elapsedTime)}
-                </span>
+                <div className="flex items-center gap-4 text-muted-foreground">
+                  <span>経過: {formatTime(elapsedTime)}</span>
+                  {estimatedRemaining !== null && (
+                    <span className="font-medium text-blue-700 dark:text-blue-400">
+                      残り約 {formatTime(estimatedRemaining)}
+                    </span>
+                  )}
+                </div>
               </div>
               <Progress value={progressPercent} className="h-3" />
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">
                   {survey.doneSteps} / {survey.totalSteps} ステップ完了
                 </span>
-                <span className="font-medium text-blue-700 dark:text-blue-400">
-                  {progressPercent}%
-                </span>
+                <div className="flex items-center gap-3">
+                  {survey.doneSteps > 0 && elapsedTime > 0 && (
+                    <span className="text-xs text-muted-foreground">
+                      ({(elapsedTime / survey.doneSteps).toFixed(1)}秒/ステップ)
+                    </span>
+                  )}
+                  <span className="font-medium text-blue-700 dark:text-blue-400">
+                    {progressPercent}%
+                  </span>
+                </div>
               </div>
               {results.length > 0 && (
                 <div className="pt-2 border-t">

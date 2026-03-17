@@ -19,14 +19,14 @@ interface SurveyConfig {
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 3000;
 
-/** 検索ONのモデルは3回試行（並列実行） */
-const SEARCH_ATTEMPT_COUNT = 3;
+/** 検索ONのモデルは2回試行（並列実行） */
+const SEARCH_ATTEMPT_COUNT = 2;
 
 /** 同一プロバイダーへの同時リクエスト上限 */
-const MAX_CONCURRENT_PER_PROVIDER = 2;
+const MAX_CONCURRENT_PER_PROVIDER = 3;
 
 /** プロンプト同時実行数 */
-const MAX_CONCURRENT_PROMPTS = 2;
+const MAX_CONCURRENT_PROMPTS = 3;
 
 // ──────────────────── ユーティリティ ────────────────────
 
