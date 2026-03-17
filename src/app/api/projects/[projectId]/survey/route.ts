@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { executeSurvey } from "@/lib/ai/survey-executor";
 
 // Vercel Serverless Function のタイムアウトを延長（並列実行のため余裕を持たせる）
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 export async function GET(
   _request: Request,
