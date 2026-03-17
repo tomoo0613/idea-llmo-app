@@ -47,6 +47,9 @@ const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secon
   failed: { label: "失敗", variant: "destructive", color: "text-red-600" },
 };
 
+/** 1ステップあたりの平均秒数（目安計算用） */
+const AVG_SECONDS_PER_STEP = 8;
+
 const PROVIDER_COLORS: Record<string, string> = {
   openai: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
   gemini: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
@@ -263,42 +266,94 @@ export default function SurveyPage() {
             )}
           </div>
 
+          {/* 開始前：目安時間の表示 */}
+          {(!survey || survey.status === "pending" || survey.status === "completed" || survey.status === "failed") && !running && project?.prompt && (
+            <div className="p-3 rounded-lg border bg-muted/30 text-sm text-muted-foreground">
+              {(() => {
+                const promptCount = project.prompt.split(/\r?\n/).filter((l: string) => l.trim()).length;
+                const modelCount = 10; // MODEL_VARIANTS の数
+                const totalSteps = promptCount * modelCount;
+                const estMinutes = Math.ceil((totalSteps * AVG_SECONDS_PER_STEP) / 60);
+                return (
+                  <div className="flex items-center gap-3">
+                    <span>実行目安:</span>
+                    <span className="font-medium text-foreground">
+                      {promptCount}プロンプト × {modelCount}モデル = {totalSteps}ステップ
+                    </span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 font-medium">
+                      約{estMinutes}分
+                    </span>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
           {/* 進捗バー */}
           {survey && survey.status === "running" && (
-            <div className="space-y-3 p-4 rounded-lg border bg-blue-50/50 dark:bg-blue-950/20">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-medium text-blue-700 dark:text-blue-400">
-                  調査進行中...
-                </span>
-                <div className="flex items-center gap-4 text-muted-foreground">
-                  <span>経過: {formatTime(elapsedTime)}</span>
-                  {estimatedRemaining !== null && (
-                    <span className="font-medium text-blue-700 dark:text-blue-400">
-                      残り約 {formatTime(estimatedRemaining)}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <Progress value={progressPercent} className="h-3" />
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">
-                  {survey.doneSteps} / {survey.totalSteps} ステップ完了
-                </span>
-                <div className="flex items-center gap-3">
-                  {survey.doneSteps > 0 && elapsedTime > 0 && (
-                    <span className="text-xs text-muted-foreground">
-                      ({(elapsedTime / survey.doneSteps).toFixed(1)}秒/ステップ)
-                    </span>
-                  )}
-                  <span className="font-medium text-blue-700 dark:text-blue-400">
-                    {progressPercent}%
+            <div className="space-y-4 p-4 rounded-lg border bg-blue-50/50 dark:bg-blue-950/20">
+              {/* ヘッダー行 */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="h-2.5 w-2.5 rounded-full bg-blue-500 animate-pulse" />
+                  <span className="font-medium text-blue-700 dark:text-blue-400 text-sm">
+                    調査進行中
                   </span>
                 </div>
+                <span className="text-2xl font-bold text-blue-700 dark:text-blue-400">
+                  {progressPercent}%
+                </span>
               </div>
+
+              {/* プログレスバー */}
+              <Progress value={progressPercent} className="h-3" />
+
+              {/* 詳細統計グリッド */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="text-center p-2 rounded-md bg-white/60 dark:bg-white/5">
+                  <p className="text-xs text-muted-foreground">ステップ</p>
+                  <p className="text-sm font-bold">{survey.doneSteps} / {survey.totalSteps}</p>
+                </div>
+                <div className="text-center p-2 rounded-md bg-white/60 dark:bg-white/5">
+                  <p className="text-xs text-muted-foreground">経過時間</p>
+                  <p className="text-sm font-bold">{formatTime(elapsedTime)}</p>
+                </div>
+                <div className="text-center p-2 rounded-md bg-white/60 dark:bg-white/5">
+                  <p className="text-xs text-muted-foreground">残り時間（推定）</p>
+                  <p className="text-sm font-bold text-blue-700 dark:text-blue-400">
+                    {estimatedRemaining !== null
+                      ? `約${formatTime(estimatedRemaining)}`
+                      : survey.totalSteps > 0
+                        ? `約${formatTime(Math.round((survey.totalSteps - survey.doneSteps) * AVG_SECONDS_PER_STEP))}`
+                        : "計算中..."
+                    }
+                  </p>
+                </div>
+                <div className="text-center p-2 rounded-md bg-white/60 dark:bg-white/5">
+                  <p className="text-xs text-muted-foreground">処理速度</p>
+                  <p className="text-sm font-bold">
+                    {survey.doneSteps > 0 && elapsedTime > 0
+                      ? `${(elapsedTime / survey.doneSteps).toFixed(1)}秒/step`
+                      : "測定中..."
+                    }
+                  </p>
+                </div>
+              </div>
+
+              {/* 完了予定時刻 */}
+              {estimatedRemaining !== null && (
+                <div className="text-center text-xs text-muted-foreground">
+                  完了予定: {new Date(Date.now() + estimatedRemaining * 1000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} 頃
+                </div>
+              )}
+
+              {/* 処理済みバッジ */}
               {results.length > 0 && (
-                <div className="pt-2 border-t">
-                  <p className="text-xs text-muted-foreground mb-2">処理済み:</p>
-                  <div className="flex flex-wrap gap-1">
+                <div className="pt-3 border-t">
+                  <p className="text-xs text-muted-foreground mb-2">
+                    処理済み ({results.length}/{survey.totalSteps}):
+                  </p>
+                  <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
                     {results.map((r) => (
                       <Badge key={r.id} variant={r.error ? "destructive" : "outline"} className="text-xs">
                         {r.error ? "✗" : "✓"} P{(r.promptIndex ?? 0) + 1}-{r.modelVariant}

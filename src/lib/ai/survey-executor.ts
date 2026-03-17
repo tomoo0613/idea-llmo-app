@@ -16,17 +16,17 @@ interface SurveyConfig {
   claudeApiKey: string | null;
 }
 
-const MAX_RETRIES = 2;
-const RETRY_DELAY_MS = 3000;
+const MAX_RETRIES = 1;
+const RETRY_DELAY_MS = 1500;
 
-/** 検索ONのモデルは2回試行（並列実行） */
-const SEARCH_ATTEMPT_COUNT = 2;
+/** 検索ONのモデルは1回のみ（速度優先） */
+const SEARCH_ATTEMPT_COUNT = 1;
 
 /** 同一プロバイダーへの同時リクエスト上限 */
-const MAX_CONCURRENT_PER_PROVIDER = 3;
+const MAX_CONCURRENT_PER_PROVIDER = 5;
 
 /** プロンプト同時実行数 */
-const MAX_CONCURRENT_PROMPTS = 3;
+const MAX_CONCURRENT_PROMPTS = 5;
 
 // ──────────────────── ユーティリティ ────────────────────
 
