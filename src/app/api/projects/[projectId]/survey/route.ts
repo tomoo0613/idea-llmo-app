@@ -1,9 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { executeSurvey } from "@/lib/ai/survey-executor";
 
-// Vercel Serverless Function のタイムアウトを延長（並列実行のため余裕を持たせる）
-export const maxDuration = 60;
+// Vercel Serverless Function のタイムアウトを延長
+export const maxDuration = 300;
 
 export async function GET(
   _request: Request,
@@ -64,17 +64,21 @@ export async function POST(
     data: { projectId, status: "pending" },
   });
 
-  // バックグラウンドで実行
-  executeSurvey({
-    surveyId: survey.id,
-    projectId,
-    prompt: project.prompt,
-    targetDomain: project.targetDomain,
-    targetServices,
-    openaiApiKey,
-    geminiApiKey,
-    claudeApiKey,
-  }).catch(console.error);
+  // after() でレスポンス送信後もサーバーレス関数を維持して実行
+  after(
+    executeSurvey({
+      surveyId: survey.id,
+      projectId,
+      prompt: project.prompt,
+      targetDomain: project.targetDomain,
+      targetServices,
+      openaiApiKey,
+      geminiApiKey,
+      claudeApiKey,
+    }).catch((err) => {
+      console.error("Survey execution error:", err);
+    })
+  );
 
   return NextResponse.json({ survey }, { status: 201 });
 }
