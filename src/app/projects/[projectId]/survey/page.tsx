@@ -198,12 +198,11 @@ export default function SurveyPage() {
     : 0;
 
   // 推定残り時間の計算
-  const estimatedRemaining = useMemo(() => {
+  const estimatedRemaining = (() => {
     if (!survey || survey.doneSteps === 0 || survey.totalSteps === 0 || elapsedTime === 0) return null;
     const avgPerStep = elapsedTime / survey.doneSteps;
-    const remaining = Math.round(avgPerStep * (survey.totalSteps - survey.doneSteps));
-    return remaining;
-  }, [survey, elapsedTime]);
+    return Math.round(avgPerStep * (survey.totalSteps - survey.doneSteps));
+  })();
 
   const statusConfig = survey ? STATUS_CONFIG[survey.status] || STATUS_CONFIG.pending : null;
 
